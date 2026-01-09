@@ -1,0 +1,333 @@
+const pool = require('../config/database');
+
+// Obtener todas las recetas
+const getAllRecipes = async (req, res) => {
+  try {
+    const [recipes] = await pool.execute(`
+      SELECT 
+        r.id_recipes as id,
+        r.pos_id_number as posIdNumber,
+        r.recipe_name as name,
+        r.total_cost as totalCost,
+        r.created_at as createdAt,
+        COUNT(ri.id_recipe_ingredient) as ingredientCount
+      FROM recipes r
+      LEFT JOIN recipe_ingredients ri ON r.id_recipes = ri.id_recipe
+      GROUP BY r.id_recipes
+      ORDER BY r.recipe_name
+    `);
+
+    res.json({
+      success: true,
+      data: recipes
+    });
+  } catch (error) {
+    console.error('Error fetching recipes:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching recipes',
+      error: error.message
+    });
+  }
+};
+
+// Obtener una receta por ID con sus ingredientes
+const getRecipeById = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Obtener receta
+    const [recipes] = await pool.execute(`
+      SELECT 
+        id_recipes as id,
+        pos_id_number as posIdNumber,
+        recipe_name as name,
+        total_cost as totalCost,
+        created_at as createdAt
+      FROM recipes
+      WHERE id_recipes = ?
+    `, [id]);
+
+    if (recipes.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Recipe not found'
+      });
+    }
+
+    // Obtener ingredientes
+    const [ingredients] = await pool.execute(`
+      SELECT 
+        ri.id_recipe_ingredient as id,
+        ri.id_product as productId,
+        p.product_name as productName,
+        ri.quantity,
+        ri.unit,
+        ri.unit_cost as unitCost,
+        ri.total_cost as totalCost
+      FROM recipe_ingredients ri
+      INNER JOIN products p ON ri.id_product = p.id_products
+      WHERE ri.id_recipe = ?
+      ORDER BY p.product_name
+    `, [id]);
+
+    const recipe = {
+      ...recipes[0],
+      ingredients
+    };
+
+    res.json({
+      success: true,
+      data: recipe
+    });
+  } catch (error) {
+    console.error('Error fetching recipe:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching recipe',
+      error: error.message
+    });
+  }
+};
+
+// Crear receta
+const createRecipe = async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+
+    const { posIdNumber, name, ingredients } = req.body;
+
+    // Validaciones
+    if (!name || !name.trim()) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Recipe name is required'
+      });
+    }
+
+    if (!ingredients || ingredients.length === 0) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'At least one ingredient is required'
+      });
+    }
+
+    // Verificar nombre único
+    const [existing] = await connection.execute(
+      'SELECT id_recipes FROM recipes WHERE LOWER(TRIM(recipe_name)) = LOWER(TRIM(?))',
+      [name]
+    );
+
+    if (existing.length > 0) {
+      await connection.rollback();
+      return res.status(409).json({
+        success: false,
+        message: 'A recipe with that name already exists'
+      });
+    }
+
+    // Calcular costo total
+    let totalCost = 0;
+    ingredients.forEach(ing => {
+      totalCost += parseFloat(ing.totalCost);
+    });
+
+    // Insertar receta
+    const [result] = await connection.execute(
+      `INSERT INTO recipes (pos_id_number, recipe_name, total_cost) 
+       VALUES (?, ?, ?)`,
+      [posIdNumber || null, name.trim(), totalCost]
+    );
+
+    const recipeId = result.insertId;
+
+    // Insertar ingredientes
+    for (const ingredient of ingredients) {
+      await connection.execute(
+        `INSERT INTO recipe_ingredients 
+         (id_recipe, id_product, quantity, unit, unit_cost, total_cost)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          recipeId,
+          ingredient.productId,
+          ingredient.quantity,
+          ingredient.unit,
+          ingredient.unitCost,
+          ingredient.totalCost
+        ]
+      );
+    }
+
+    await connection.commit();
+
+    res.status(201).json({
+      success: true,
+      message: 'Recipe created successfully',
+      data: { id: recipeId }
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error creating recipe:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error creating recipe',
+      error: error.message
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+// Actualizar receta
+const updateRecipe = async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+
+    const { id } = req.params;
+    const { posIdNumber, name, ingredients } = req.body;
+
+    // Validaciones
+    if (!name || !name.trim()) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Recipe name is required'
+      });
+    }
+
+    if (!ingredients || ingredients.length === 0) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'At least one ingredient is required'
+      });
+    }
+
+    // Verificar que existe
+    const [existing] = await connection.execute(
+      'SELECT id_recipes FROM recipes WHERE id_recipes = ?',
+      [id]
+    );
+
+    if (existing.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({
+        success: false,
+        message: 'Recipe not found'
+      });
+    }
+
+    // Verificar nombre único (excluyendo la receta actual)
+    const [duplicate] = await connection.execute(
+      'SELECT id_recipes FROM recipes WHERE LOWER(TRIM(recipe_name)) = LOWER(TRIM(?)) AND id_recipes != ?',
+      [name, id]
+    );
+
+    if (duplicate.length > 0) {
+      await connection.rollback();
+      return res.status(409).json({
+        success: false,
+        message: 'A recipe with that name already exists'
+      });
+    }
+
+    // Calcular costo total
+    let totalCost = 0;
+    ingredients.forEach(ing => {
+      totalCost += parseFloat(ing.totalCost);
+    });
+
+    // Actualizar receta
+    await connection.execute(
+      `UPDATE recipes 
+       SET pos_id_number = ?, recipe_name = ?, total_cost = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id_recipes = ?`,
+      [posIdNumber || null, name.trim(), totalCost, id]
+    );
+
+    // Eliminar ingredientes existentes
+    await connection.execute(
+      'DELETE FROM recipe_ingredients WHERE id_recipe = ?',
+      [id]
+    );
+
+    // Insertar nuevos ingredientes
+    for (const ingredient of ingredients) {
+      await connection.execute(
+        `INSERT INTO recipe_ingredients 
+         (id_recipe, id_product, quantity, unit, unit_cost, total_cost)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          ingredient.productId,
+          ingredient.quantity,
+          ingredient.unit,
+          ingredient.unitCost,
+          ingredient.totalCost
+        ]
+      );
+    }
+
+    await connection.commit();
+
+    res.json({
+      success: true,
+      message: 'Recipe updated successfully'
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error updating recipe:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error updating recipe',
+      error: error.message
+    });
+  } finally {
+    connection.release();
+  }
+};
+
+// Eliminar receta
+const deleteRecipe = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const [result] = await pool.execute(
+      'DELETE FROM recipes WHERE id_recipes = ?',
+      [id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Recipe not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Recipe deleted successfully'
+    });
+  } catch (error) {
+    console.error('Error deleting recipe:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error deleting recipe',
+      error: error.message
+    });
+  }
+};
+
+module.exports = {
+  getAllRecipes,
+  getRecipeById,
+  createRecipe,
+  updateRecipe,
+  deleteRecipe
+};
