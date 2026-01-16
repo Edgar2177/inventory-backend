@@ -1,4 +1,4 @@
-const pool = require('../config/database'); // Removido { pool }, ahora es solo pool
+const pool = require('../config/database'); 
 const { convertToBaseUnit } = require('../utils/unitConversions');
 
 // Agregar esta función aquí temporalmente
@@ -557,10 +557,91 @@ const deleteProduct = async (req, res) => {
   }
 };
 
+// Exportar productos a CSV
+const exportProductsToCSV = async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        p.product_name as 'Product Name',
+        p.product_code as 'Product Code',
+        pt.product_name as 'Product Type',
+        c.category_name as 'Category',
+        p.container_type as 'Container Type',
+        p.container_size as 'Container Size',
+        p.container_unit as 'Container Unit',
+        p.wholesale_price as 'Wholesale Price',
+        p.single_portion_size as 'Single Portion Size',
+        p.single_portion_unit as 'Single Portion Unit',
+        p.full_weight as 'Full Weight',
+        p.full_weight_unit as 'Full Weight Unit',
+        p.empty_weight as 'Empty Weight',
+        p.empty_weight_unit as 'Empty Weight Unit',
+        p.case_size as 'Case Size',
+        v.vendor_name as 'Vendor',
+        p.created_at as 'Created At',
+        p.updated_at as 'Updated At'
+      FROM products p
+      INNER JOIN product_types pt ON p.id_product_type = pt.id_product_types
+      INNER JOIN categories c ON p.id_category = c.id_categories
+      LEFT JOIN vendors v ON p.id_vendor = v.id_vendors
+      ORDER BY p.product_name
+    `;
+    
+    const [rows] = await pool.execute(query, []);
+    
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'No hay productos para exportar'
+      });
+    }
+
+    // Convertir a CSV
+    const headers = Object.keys(rows[0]);
+    const csvHeaders = headers.join(',');
+    
+    const csvRows = rows.map(row => {
+      return headers.map(header => {
+        const value = row[header];
+        // Manejar valores nulos y escapar comillas
+        if (value === null || value === undefined) {
+          return '';
+        }
+        // Si el valor contiene comas o comillas, envolverlo en comillas
+        const stringValue = String(value);
+        if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
+          return `"${stringValue.replace(/"/g, '""')}"`;
+        }
+        return stringValue;
+      }).join(',');
+    });
+    
+    const csv = [csvHeaders, ...csvRows].join('\n');
+    
+    // Configurar headers para descarga
+    const timestamp = new Date().toISOString().split('T')[0];
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="products_export_${timestamp}.csv"`);
+    
+    // Agregar BOM para Excel
+    res.write('\ufeff');
+    res.end(csv);
+    
+  } catch (error) {
+    console.error('Error al exportar productos:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al exportar los productos',
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   getAllProducts,
   getProductById,
   createProduct,
   updateProduct,
-  deleteProduct
+  deleteProduct,
+  exportProductsToCSV
 };

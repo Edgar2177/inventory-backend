@@ -70,7 +70,8 @@ app.use('/api/pos', posRoutes);
 const inventoriesRoutes = require('./src/routes/inventories');
 app.use('/api/inventories', inventoriesRoutes);
 
-
+const prepsRoutes = require('./src/routes/preps');
+app.use('/api/preps', prepsRoutes);
 
 //Manejo de Errores
 app.use((err, eq, res, next) => {

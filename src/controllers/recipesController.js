@@ -3,6 +3,15 @@ const pool = require('../config/database');
 // Obtener todas las recetas
 const getAllRecipes = async (req, res) => {
   try {
+    const { storeId } = req.query;
+
+    if(!storeId){
+      return res.status(400).json({
+        success: false,
+        message: 'storeId is require'
+      });
+    }
+
     const [recipes] = await pool.execute(`
       SELECT 
         r.id_recipes as id,
@@ -11,11 +20,13 @@ const getAllRecipes = async (req, res) => {
         r.total_cost as totalCost,
         r.created_at as createdAt,
         COUNT(ri.id_recipe_ingredient) as ingredientCount
-      FROM recipes r
-      LEFT JOIN recipe_ingredients ri ON r.id_recipes = ri.id_recipe
+      FROM recipes r 
+      LEFT JOIN recipe_ingredients ri 
+        ON r.id_recipes = ri.id_recipe
+      WHERE r.id_stores = ?
       GROUP BY r.id_recipes
       ORDER BY r.recipe_name
-    `);
+    `,[storeId]);
 
     res.json({
       success: true,
@@ -35,6 +46,14 @@ const getAllRecipes = async (req, res) => {
 const getRecipeById = async (req, res) => {
   try {
     const { id } = req.params;
+    const { storeId } = req.query;
+
+    if (!storeId){
+      return res.status(400).json({
+        success: false,
+        message: 'storeId is required'
+      });
+    }
 
     // Obtener receta
     const [recipes] = await pool.execute(`
@@ -45,8 +64,8 @@ const getRecipeById = async (req, res) => {
         total_cost as totalCost,
         created_at as createdAt
       FROM recipes
-      WHERE id_recipes = ?
-    `, [id]);
+      WHERE id_recipes = ? AND id_stores = ?
+    `, [id, storeId]);
 
     if (recipes.length === 0) {
       return res.status(404).json({
@@ -97,9 +116,15 @@ const createRecipe = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    const { posIdNumber, name, ingredients } = req.body;
+    const { storeId, posIdNumber, name, ingredients } = req.body;
 
     // Validaciones
+    if(!storeId){
+      return res.status(400).json({
+        success: false,
+        message: 'storedId is required'
+      });
+    }
     if (!name || !name.trim()) {
       await connection.rollback();
       return res.status(400).json({
@@ -118,8 +143,8 @@ const createRecipe = async (req, res) => {
 
     // Verificar nombre único
     const [existing] = await connection.execute(
-      'SELECT id_recipes FROM recipes WHERE LOWER(TRIM(recipe_name)) = LOWER(TRIM(?))',
-      [name]
+      'SELECT id_recipes FROM recipes WHERE id_stores = ? AND LOWER(TRIM(recipe_name)) = LOWER(TRIM(?))',
+      [storeId, name]
     );
 
     if (existing.length > 0) {
@@ -138,9 +163,9 @@ const createRecipe = async (req, res) => {
 
     // Insertar receta
     const [result] = await connection.execute(
-      `INSERT INTO recipes (pos_id_number, recipe_name, total_cost) 
-       VALUES (?, ?, ?)`,
-      [posIdNumber || null, name.trim(), totalCost]
+      `INSERT INTO recipes (id_stores, pos_id_number, recipe_name, total_cost) 
+       VALUES (?, ?, ?, ?)`,
+      [storeId, posIdNumber || null, name.trim(), totalCost]
     );
 
     const recipeId = result.insertId;
@@ -211,8 +236,8 @@ const updateRecipe = async (req, res) => {
 
     // Verificar que existe
     const [existing] = await connection.execute(
-      'SELECT id_recipes FROM recipes WHERE id_recipes = ?',
-      [id]
+      'SELECT id_recipes FROM recipes WHERE id_stores = ? AND LOWER(TRIM(recipe_name)) = LOWER(TRIM(?)) AND id_recipes !=?',
+      [storeId, name, id]
     );
 
     if (existing.length === 0) {
@@ -299,7 +324,7 @@ const deleteRecipe = async (req, res) => {
     const { id } = req.params;
 
     const [result] = await pool.execute(
-      'DELETE FROM recipes WHERE id_recipes = ?',
+      'DELETE FROM recipes WHERE id_recipes = ? AND id_recipes',
       [id]
     );
 

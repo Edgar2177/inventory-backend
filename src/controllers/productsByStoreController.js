@@ -48,11 +48,14 @@ const getProductsByStoreId = async (req, res) => {
         p.container_size as containerSize,
         p.container_unit as containerUnit,
         p.container_type as containerType,
+        p.wholesale_price as wholesalePrice,
+        c.category_name as categoryName,
         ps.par as par,
         ps.reorder_point as reorderPoint,
         ps.order_by_the as orderByThe
       FROM products_by_store ps
       INNER JOIN products p ON ps.id_product = p.id_products
+      LEFT JOIN categories c ON p.id_category = c.id_categories
       WHERE ps.id_store = ?
       ORDER BY p.product_name
     `;
