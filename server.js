@@ -9,6 +9,7 @@ const PORT = process.env.PORT || 5000;
 // CONFIGURACIÓN DE CORS
 const corsOptions = {
   origin: function (origin, callback) {
+    // Permitir peticiones sin origen 
     if (!origin) {
       callback(null, true);
       return;
@@ -22,7 +23,7 @@ const corsOptions = {
       'http://localhost:3010'
     ];
     
-    // Verifica si el origen está permitido
+    // Verificar si el origen está permitido
     if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
@@ -31,6 +32,7 @@ const corsOptions = {
         console.warn(`Origen bloqueado por CORS: ${origin}`);
         callback(new Error('Not allowed by CORS'));
       } else {
+        // En desarrollo, permitir todos los orígenes
         callback(null, true);
       }
     }
@@ -42,11 +44,18 @@ const corsOptions = {
   maxAge: 86400 // 24 horas
 };
 
-// Aplicar CORS
+// Aplicar CORS a todas las rutas
 app.use(cors(corsOptions));
 
-// Middleware para manejar preflight requests
-app.options('*', cors(corsOptions));
+// Middleware para manejar preflight requests de forma MANUAL
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin, X-Requested-With');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Max-Age', '86400');
+  res.status(200).send();
+});
 
 // Middlewares adicionales
 app.use(express.json());
@@ -103,6 +112,7 @@ app.use('/api/products', productsRoutes);
 const productsByStoreRoutes = require('./src/routes/productsByStore');
 app.use('/api/products-by-store', productsByStoreRoutes);
 
+// Rutas de autenticación y usuarios
 const authRoutes = require('./src/routes/auth');
 app.use('/api/auth', authRoutes);
 
@@ -154,7 +164,7 @@ app.use((err, req, res, next) => {
 });
 
 // Manejo de rutas no encontradas
-app.use('*', (req, res) => {
+app.use((req, res, next) => {
   res.status(404).json({
     success: false,
     message: 'Ruta no encontrada',
