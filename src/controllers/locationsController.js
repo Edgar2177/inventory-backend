@@ -34,7 +34,6 @@ const getAllLocations = async (req, res) => {
         l.location_name AS name,
         l.created_at AS createdAt,
         l.id_store AS storeId,
-        l.num_botella,
         s.store_name AS storeName
       FROM locations l
       INNER JOIN stores s ON l.id_store = s.id_stores
