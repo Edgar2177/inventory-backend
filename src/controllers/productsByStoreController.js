@@ -1,4 +1,5 @@
 const pool = require('../config/database'); 
+
 // Obtener todas las relaciones productos-tiendas
 const getAllProductsByStore = async (req, res) => {
   try {
@@ -20,7 +21,7 @@ const getAllProductsByStore = async (req, res) => {
       ORDER BY s.store_name, p.product_name
     `;
     
-    const [rows] = await pool.execute(query, []); // Agregado [] como segundo parámetro
+    const [rows] = await pool.execute(query, []);
     res.json({
       success: true,
       data: rows
@@ -48,7 +49,13 @@ const getProductsByStoreId = async (req, res) => {
         p.container_size as containerSize,
         p.container_unit as containerUnit,
         p.container_type as containerType,
+        p.case_size as caseSize,
         p.wholesale_price as wholesalePrice,
+        
+        -- ⭐ CAMPOS DE PESO EN GRAMOS (columnas base_unit que ya existen):
+        p.full_weight_base_unit as fullWeightBaseUnit,
+        p.empty_weight_base_unit as emptyWeightBaseUnit,
+        
         c.category_name as categoryName,
         ps.par as par,
         ps.reorder_point as reorderPoint,
@@ -61,6 +68,17 @@ const getProductsByStoreId = async (req, res) => {
     `;
     
     const [rows] = await pool.execute(query, [storeId]);
+    
+    // Debug: Mostrar el primer producto
+    if (rows.length > 0) {
+      console.log('✅ Productos cargados:', rows.length);
+      console.log('📦 Primer producto:', {
+        nombre: rows[0].productName,
+        fullWeightBaseUnit: rows[0].fullWeightBaseUnit,
+        emptyWeightBaseUnit: rows[0].emptyWeightBaseUnit
+      });
+    }
+    
     res.json({
       success: true,
       data: rows
