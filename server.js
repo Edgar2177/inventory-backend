@@ -10,7 +10,9 @@ const PORT = process.env.PORT || 5000;
 const corsOptions = {
   origin: [
     'https://inventory.callhospitality.ca',
-    'http://localhost:3000'
+    'https://www.inventory.callhospitality.ca',
+    'http://localhost:3000',
+    'http://localhost:3010'
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
@@ -64,6 +66,12 @@ app.use('/api/inventories', inventoriesRoutes);
 
 const prepsRoutes = require('./src/routes/preps');
 app.use('/api/preps', prepsRoutes);
+
+const ordersRoutes = require('./src/routes/orders');
+app.use('/api/orders', ordersRoutes);
+
+const physicalInventoryRoutes = require('./src/routes/physicalinventory');
+app.use('/api/physical-inventories', physicalInventoryRoutes);
 
 // Manejo de rutas no encontradas
 app.use((req, res) => {
