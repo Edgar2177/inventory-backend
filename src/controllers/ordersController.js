@@ -38,8 +38,6 @@ const getInventoriesForOrdering = async (req, res) => {
 // ============================================
 // HELPERS DE CONVERSIÓN
 // ============================================
-
-// Convierte una cantidad en su unidad original a gramos/ml (base unit)
 const toBaseGrams = (quantity, unit) => {
   switch (unit) {
     case 'kg':     return quantity * 1000;
@@ -55,11 +53,6 @@ const toBaseGrams = (quantity, unit) => {
   }
 };
 
-// Calcula el stock en unidades de contenedor a partir de los rows de inventory_items
-// Lógica:
-//   - Contables (Bottle, Keg, etc.)    → quantity directamente
-//   - Pesados con full/empty > 0       → porcentaje de llenado (fórmula botella)
-//   - A granel (kg, lb, oz, g, ml, L)  → convierte a base unit y divide entre container_size_base_unit
 const calcStockUnits = (rows, containerSizeBaseUnit) => {
   let total = 0;
 
@@ -72,22 +65,16 @@ const calcStockUnits = (rows, containerSizeBaseUnit) => {
     const countUnits = ['Bottle', 'Can', 'Keg', 'Each', 'Box', 'Bag', 'Carton'];
 
     if (countUnits.includes(qtype)) {
-      // Contable directo
       total += qty;
-
     } else {
-      // Unidad de peso o volumen
       const emptyIsReal = (row.empty_weight !== null && row.empty_weight !== undefined);
       const emptyVal    = emptyIsReal ? parseFloat(row.empty_weight) : 0;
 
       if (net > 0 && full > 0 && emptyIsReal && emptyVal > 0) {
-        // Botella pesada: calcular porcentaje de llenado
         const qtyInGrams = toBaseGrams(qty, qtype);
         const pct = (qtyInGrams - emptyVal) / net;
         total += Math.max(0, pct);
-
       } else {
-        // A granel: la cantidad YA es el stock, solo convertir a unidades de contenedor
         const qtyInGrams = toBaseGrams(qty, qtype);
         const contBase   = parseFloat(containerSizeBaseUnit) || 1;
         total += contBase > 0 ? qtyInGrams / contBase : 0;
@@ -96,6 +83,29 @@ const calcStockUnits = (rows, containerSizeBaseUnit) => {
   }
 
   return total;
+};
+
+// ============================================
+// GENERATE ORDER NUMBER (inline — no SP)
+// ============================================
+const generateOrderNumber = async (connection, storeId) => {
+  const year = new Date().getFullYear();
+
+  const [[lastOrder]] = await connection.execute(
+    `SELECT order_number FROM orders 
+     WHERE id_store = ? AND order_number LIKE ?
+     ORDER BY id_orders DESC LIMIT 1`,
+    [storeId, `ORD-${year}-%`]
+  );
+
+  let nextNum = 1;
+  if (lastOrder?.order_number) {
+    const parts = lastOrder.order_number.split('-');
+    const parsed = parseInt(parts[2]);
+    if (!isNaN(parsed)) nextNum = parsed + 1;
+  }
+
+  return `ORD-${year}-${String(nextNum).padStart(3, '0')}`;
 };
 
 // ============================================
@@ -109,7 +119,6 @@ const calculateOrderSuggestions = async (req, res) => {
       return res.status(400).json({ message: 'Inventory ID and Store ID are required' });
     }
 
-    // 1. Obtener todos los productos del store con sus vendors, categoría y container_size_base_unit
     const [productsWithVendors] = await pool.execute(
       `SELECT 
         p.id_products,
@@ -137,7 +146,6 @@ const calculateOrderSuggestions = async (req, res) => {
       [storeId]
     );
 
-    // 2. Obtener todos los inventory_items de esa fecha (raw, sin calcular stock en SQL)
     const [inventoryItems] = await pool.execute(
       `SELECT
         ii.id_product,
@@ -158,36 +166,26 @@ const calculateOrderSuggestions = async (req, res) => {
       [storeId, inventoryId]
     );
 
-    // Agrupar items por producto (puede haber múltiples ubicaciones)
     const itemsByProduct = {};
     inventoryItems.forEach(item => {
-      if (!itemsByProduct[item.id_product]) {
-        itemsByProduct[item.id_product] = [];
-      }
+      if (!itemsByProduct[item.id_product]) itemsByProduct[item.id_product] = [];
       itemsByProduct[item.id_product].push(item);
     });
 
-    // Set de productos que sí fueron contados en el inventario
     const countedProductIds = new Set(Object.keys(itemsByProduct).map(Number));
 
-    // Map de productos para lookup rápido
     const productMap = {};
-    productsWithVendors.forEach(p => {
-      productMap[p.id_products] = p;
-    });
+    productsWithVendors.forEach(p => { productMap[p.id_products] = p; });
 
-    // 3. Calcular stock en unidades de contenedor por producto
     const stockMap = {};
     countedProductIds.forEach(productId => {
       const rows    = itemsByProduct[productId];
       const product = productMap[productId];
       if (!product) return;
-
       const containerSizeBaseUnit = parseFloat(product.container_size_base_unit) || 1;
       stockMap[productId] = calcStockUnits(rows, containerSizeBaseUnit);
     });
 
-    // 4. Calcular sugerencias por vendor
     const vendorGroups = {};
 
     productsWithVendors.forEach(product => {
@@ -203,28 +201,22 @@ const calculateOrderSuggestions = async (req, res) => {
         };
       }
 
-      const stockOnHand  = stockMap[product.id_products] !== undefined
-        ? stockMap[product.id_products]
-        : 0;
-
+      const stockOnHand   = stockMap[product.id_products] !== undefined ? stockMap[product.id_products] : 0;
       const reorderPoint  = parseFloat(product.reorder_point) || 0;
       const par           = parseFloat(product.par)           || 0;
       const caseSize      = parseFloat(product.case_size)     || 1;
       const orderBy       = product.order_by || product.container_type;
       const isOrderByCase = orderBy === 'Case';
 
-      // Convertir par y reorder a cajas si order_by = Case
-      const parForCalc     = isOrderByCase ? par / caseSize          : par;
-      const reorderForCalc = isOrderByCase ? reorderPoint / caseSize  : reorderPoint;
-      const stockForCalc   = isOrderByCase ? stockOnHand / caseSize   : stockOnHand;
+      const parForCalc     = isOrderByCase ? par / caseSize         : par;
+      const reorderForCalc = isOrderByCase ? reorderPoint / caseSize : reorderPoint;
+      const stockForCalc   = isOrderByCase ? stockOnHand / caseSize  : stockOnHand;
 
-      // Precio
       const wholesalePrice = parseFloat(product.wholesale_price) || 0;
       const unitPrice = isOrderByCase
         ? wholesalePrice
         : (caseSize > 0 ? wholesalePrice / caseSize : wholesalePrice);
 
-      // Sugerido
       let suggestedOrder = 0;
       if (stockForCalc <= reorderForCalc) {
         const unitsNeeded = parForCalc - stockForCalc;
@@ -274,12 +266,12 @@ const createOrder = async (req, res) => {
     const { storeId, vendorId, inventoryId, items, notes, createdBy } = req.body;
 
     if (!storeId || !vendorId || !items || items.length === 0) {
+      await connection.rollback();
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
-    await connection.execute('CALL sp_generate_order_number(?, @order_number)', [storeId]);
-    const [rows] = await connection.execute('SELECT @order_number as order_number');
-    const orderNumber = rows[0];
+    // Generar order number inline — sin stored procedure
+    const orderNumber = await generateOrderNumber(connection, storeId);
 
     let totalItems  = 0;
     let totalAmount = 0;
@@ -293,7 +285,7 @@ const createOrder = async (req, res) => {
     const [orderResult] = await connection.execute(
       `INSERT INTO orders (id_store, id_vendor, id_inventory, order_number, order_date, status, total_items, total_amount, notes, created_by)
        VALUES (?, ?, ?, ?, NOW(), 'Draft', ?, ?, ?, ?)`,
-      [storeId, vendorId, inventoryId, orderNumber.order_number, totalItems, totalAmount, notes, createdBy]
+      [storeId, vendorId, inventoryId, orderNumber, totalItems, totalAmount, notes, createdBy]
     );
 
     const orderId = orderResult.insertId;
@@ -321,7 +313,7 @@ const createOrder = async (req, res) => {
     }
 
     await connection.commit();
-    res.json({ success: true, message: 'Order created successfully', data: { order_id: orderId, order_number: orderNumber.order_number } });
+    res.json({ success: true, message: 'Order created successfully', data: { order_id: orderId, order_number: orderNumber } });
   } catch (error) {
     await connection.rollback();
     console.error('Error creating order:', error);
@@ -430,8 +422,6 @@ const sendOrderEmail = async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error sending order email:', error);
-    console.error('❌ sendOrderEmail error:', error.message);
-    console.error('❌ Stack:', error.stack);
 
     if (error.message?.toLowerCase().includes('payload') ||
         error.message?.toLowerCase().includes('413') ||
@@ -578,6 +568,9 @@ const getOrdersForView = async (req, res) => {
   }
 };
 
+// ============================================
+// DELETE ORDER
+// ============================================
 const deleteOrder = async (req, res) => {
   try {
     const { id } = req.params;
