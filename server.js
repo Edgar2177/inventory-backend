@@ -73,6 +73,12 @@ app.use('/api/orders', ordersRoutes);
 const physicalInventoryRoutes = require('./src/routes/physicalinventory');
 app.use('/api/physical-inventories', physicalInventoryRoutes);
 
+const notificationsRoutes = require('./src/routes/notifications');
+app.use('/api/notifications', notificationsRoutes);
+
+const invoicesRoutes = require('./src/routes/invoices');
+app.use('/api/invoices', invoicesRoutes);
+
 // Manejo de rutas no encontradas
 app.use((req, res) => {
   res.status(404).json({
