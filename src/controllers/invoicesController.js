@@ -622,36 +622,33 @@ const deleteInvoice = async (req, res) => {
     connection.release();
   }
 };
-
 // ============================================================
-// GET VENDORS FOR STORE (para el modal No-Order)
+// GET VENDORS FOR STORE — retorna TODOS los vendors
 // ============================================================
 const getVendorsForStore = async (req, res) => {
   try {
     const { storeId } = req.query;
     if (!storeId)
       return res.status(400).json({ success: false, message: 'storeId is required' });
-
+ 
     const [vendors] = await pool.execute(
-      `SELECT DISTINCT
+      `SELECT 
          v.id_vendors,
          v.vendor_name,
          v.contact_name,
          v.email,
          v.phone
        FROM vendors v
-       INNER JOIN orders o ON o.id_vendor = v.id_vendors
-       WHERE o.id_store = ?
        ORDER BY v.vendor_name ASC`,
-      [storeId]
     );
-
+ 
     res.json({ success: true, data: vendors });
   } catch (error) {
     console.error('Error fetching vendors for store:', error);
     res.status(500).json({ success: false, message: 'Error fetching vendors', error: error.message });
   }
 };
+ 
 
 module.exports = {
   getOrderDatesForInvoice,
