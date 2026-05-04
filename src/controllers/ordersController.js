@@ -146,6 +146,7 @@ const calculateOrderSuggestions = async (req, res) => {
       [storeId]
     );
 
+    // Items del inventario actual
     const [inventoryItems] = await pool.execute(
       `SELECT
         ii.id_product,
@@ -166,6 +167,75 @@ const calculateOrderSuggestions = async (req, res) => {
       [storeId, inventoryId]
     );
 
+    // ── Fecha del inventario actual ───────────────────────────────────────────
+    const [[currentInvRow]] = await pool.execute(
+      'SELECT DATE(inventory_date) as inv_date FROM inventories WHERE id_inventories = ?',
+      [inventoryId]
+    );
+    const currentInvDate = currentInvRow?.inv_date || null;
+
+    // ── Inventario anterior (más reciente antes del actual, mismo store, locked) ──
+    const [[prevInvRow]] = await pool.execute(
+      `SELECT DATE(inventory_date) as inv_date
+       FROM inventories
+       WHERE id_store = ? AND status = 'Locked'
+         AND DATE(inventory_date) < ?
+       ORDER BY inventory_date DESC
+       LIMIT 1`,
+      [storeId, currentInvDate]
+    );
+    const prevInvDate = prevInvRow?.inv_date || null;
+
+    // ── Items del inventario anterior ─────────────────────────────────────────
+    const prevItemsByProduct = {};
+    if (prevInvDate) {
+      const [prevItems] = await pool.execute(
+        `SELECT ii.id_product, ii.quantity_type, ii.quantity,
+                ii.full_weight, ii.empty_weight, ii.net_weight
+         FROM inventory_items ii
+         INNER JOIN inventories i ON ii.id_inventory = i.id_inventories
+         WHERE i.id_store = ? AND i.status = 'Locked'
+           AND DATE(i.inventory_date) = ?`,
+        [storeId, prevInvDate]
+      );
+      prevItems.forEach(item => {
+        if (!prevItemsByProduct[item.id_product]) prevItemsByProduct[item.id_product] = [];
+        prevItemsByProduct[item.id_product].push(item);
+      });
+    }
+
+    // ── Compras (invoices) entre inventario anterior y actual ─────────────────
+    // ⚠️  Verifica que los nombres de tabla coincidan con tu esquema:
+    //     - Tabla de facturas:       invoices      (columnas: id_invoices, id_store, invoice_date)
+    //     - Tabla de items factura:  invoice_items (columnas: id_invoice, id_product, quantity)
+    // ── Compras (invoices) entre inventario anterior y actual ─────────────────
+    const purchaseByProduct = {};
+    if (prevInvDate && currentInvDate) {
+      try {
+        const [purchases] = await pool.execute(
+          `SELECT 
+             ii.id_product,
+             SUM(ii.received_qty) as total_qty
+           FROM invoice_items ii
+           INNER JOIN invoices inv ON ii.id_invoice = inv.id_invoice
+           LEFT JOIN orders o ON inv.id_order = o.id_orders
+           WHERE inv.id_store = ?
+             AND inv.status = 'Saved'
+             AND ii.received_qty IS NOT NULL
+             AND DATE(COALESCE(inv.invoice_date, o.sent_at, inv.created_at)) >= ?
+             AND DATE(COALESCE(inv.invoice_date, o.sent_at, inv.created_at)) < ?
+           GROUP BY ii.id_product`,
+          [storeId, prevInvDate, currentInvDate]
+        );
+        purchases.forEach(p => {
+          purchaseByProduct[p.id_product] = parseFloat(p.total_qty) || 0;
+        });
+      } catch (e) {
+        console.warn('⚠️  Error fetching purchases:', e.message);
+      }
+    }
+
+    // ── Agrupar items del inventario actual por producto ──────────────────────
     const itemsByProduct = {};
     inventoryItems.forEach(item => {
       if (!itemsByProduct[item.id_product]) itemsByProduct[item.id_product] = [];
@@ -177,6 +247,7 @@ const calculateOrderSuggestions = async (req, res) => {
     const productMap = {};
     productsWithVendors.forEach(p => { productMap[p.id_products] = p; });
 
+    // ── Stock on hand actual ──────────────────────────────────────────────────
     const stockMap = {};
     countedProductIds.forEach(productId => {
       const rows    = itemsByProduct[productId];
@@ -186,6 +257,7 @@ const calculateOrderSuggestions = async (req, res) => {
       stockMap[productId] = calcStockUnits(rows, containerSizeBaseUnit);
     });
 
+    // ── Armar grupos por vendor ───────────────────────────────────────────────
     const vendorGroups = {};
 
     productsWithVendors.forEach(product => {
@@ -201,6 +273,7 @@ const calculateOrderSuggestions = async (req, res) => {
         };
       }
 
+      const containerSizeBaseUnit = parseFloat(product.container_size_base_unit) || 1;
       const stockOnHand   = stockMap[product.id_products] !== undefined ? stockMap[product.id_products] : 0;
       const reorderPoint  = parseFloat(product.reorder_point) || 0;
       const par           = parseFloat(product.par)           || 0;
@@ -224,6 +297,24 @@ const calculateOrderSuggestions = async (req, res) => {
         if (suggestedOrder < 0) suggestedOrder = 0;
       }
 
+      // ── Opening Last Inv ────────────────────────────────────────────────────
+      const prevRows   = prevItemsByProduct[product.id_products] || [];
+      const openingRaw = prevRows.length > 0
+        ? calcStockUnits(prevRows, containerSizeBaseUnit)
+        : 0;
+      const openingLastInv = isOrderByCase ? openingRaw / caseSize : openingRaw;
+
+      // ── Purchase (facturas entre inventario anterior y actual) ──────────────
+      // Las cantidades en invoice_items se asumen en unidades de contenedor (botellas, etc.)
+      const purchaseRaw = purchaseByProduct[product.id_products] || 0;
+      const purchase = purchaseRaw;
+
+      // ── Sold (0 por ahora) ──────────────────────────────────────────────────
+      const sold = 0;
+
+      // ── Variance = Stock on hand - (Opening + Purchase) + Sold ─────────────
+      const variance = stockForCalc - (openingLastInv + purchase) + sold;
+
       vendorGroups[vendorId].products.push({
         id_product:                product.id_products,
         product_name:              product.product_name,
@@ -231,8 +322,15 @@ const calculateOrderSuggestions = async (req, res) => {
         container_size:            product.container_size,
         container_unit:            product.container_unit,
         category_name:             product.category_name || 'Uncategorized',
-        stock_on_hand:             parseFloat(stockForCalc.toFixed(2)),
+        // Stock actual
+        stock_on_hand:             parseFloat(stockForCalc.toFixed(4)),
         stock_on_hand_raw:         parseFloat(stockOnHand.toFixed(4)),
+        // Nuevos campos
+        opening_last_inv:          parseFloat(openingLastInv.toFixed(4)),
+        purchase:                  parseFloat(purchase.toFixed(4)),
+        sold,
+        variance:                  parseFloat(variance.toFixed(4)),
+        // Existentes
         reorder_point:             reorderPoint,
         par,
         case_size:                 caseSize,
@@ -246,7 +344,12 @@ const calculateOrderSuggestions = async (req, res) => {
 
     res.json({
       success: true,
-      data: { inventory_id: inventoryId, vendors: Object.values(vendorGroups) }
+      data: {
+        inventory_id:   inventoryId,
+        current_date:   currentInvDate,
+        prev_date:      prevInvDate,
+        vendors:        Object.values(vendorGroups)
+      }
     });
 
   } catch (error) {
@@ -270,7 +373,6 @@ const createOrder = async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
-    // Generar order number inline — sin stored procedure
     const orderNumber = await generateOrderNumber(connection, storeId);
 
     let totalItems  = 0;
@@ -428,7 +530,7 @@ const sendOrderEmail = async (req, res) => {
         error.message?.toLowerCase().includes('large')) {
       return res.status(413).json({
         success: false,
-        message: 'Order has too many items to send via email. Consider splitting the order or using a different method.',
+        message: 'Order has too many items to send via email.',
         error: 'Payload too large',
         items_count: req.body.items?.length || 'unknown'
       });
